@@ -1,353 +1,570 @@
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from scipy.stats import norm
-# from statsmodels.stats.proportion import proportions_ztest
+# import requests
+# import random
+# from faker import Faker
 
-from collections import defaultdict
-import random
-import enum
-from datetime import datetime
+# fake = Faker()
 
-app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///ab_testing.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
+# EXPERIMENT_ID = 1  
+# BASE_URL = "http://127.0.0.1:5001"
 
 
-# Models
+# CONVERSION_RATES = {
+#     "Red Button": 0.3,
+#     "Blue Button": 0.5
+# }
 
-# class User(db.Model):
-#     user_id = db.Column(db.Integer, primary_key=True)
-#     email = db.Column(db.String, unique=True)
-    
+# assignment_map = {}  
 
-
-# class Experiment(db.Model):
-#     experiment_id = db.Column(db.Integer, primary_key=True)
-#     name = db.Column(db.String)
-#     start_date = db.Column(db.DateTime)
-#     end_date = db.Column(db.DateTime)
-#     status = db.Column(db.String)
-
-
-# class Variant(db.Model):
-#     variant_id = db.Column(db.Integer, primary_key=True)
-#     experiment_id = db.Column(db.Integer, db.ForeignKey('experiment.experiment_id'))
-#     name = db.Column(db.String)
-
-
-# class Assignment(db.Model):
-#     assignment_id = db.Column(db.Integer, primary_key=True)
-#     user_id = db.Column(db.Integer, db.ForeignKey('user.user_id'))
-#     variant_id = db.Column(db.Integer, db.ForeignKey('variant.variant_id'))
-#     assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-
-# class Metric(db.Model):
-#     metric_id = db.Column(db.Integer, primary_key=True)
-#     name = db.Column(db.String)
-#     description = db.Column(db.String)
-
-
-# class MetricResult(db.Model):
-#     result_id = db.Column(db.Integer, primary_key=True)
-#     assignment_id = db.Column(db.Integer, db.ForeignKey('assignment.assignment_id'))
-#     metric_id = db.Column(db.Integer, db.ForeignKey('metric.metric_id'))
-#     value = db.Column(db.Float)
-#     recorded_at = db.Column(db.DateTime, default=datetime.utcnow)
-class ExperimentStatus(enum.Enum):
-    ACTIVE = "active"
-    COMPLETED = "completed"
-    PAUSED = "paused"
-
-
-class User(db.Model):
-    __tablename__ = 'user'
-
-    user_id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String, unique=True, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
-
-    assignments = db.relationship("Assignment", backref="user", cascade="all, delete-orphan")
-
-
-class Experiment(db.Model):
-    __tablename__ = 'experiment'
-
-    experiment_id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String, nullable=False)
-    start_date = db.Column(db.DateTime, nullable=False)
-    end_date = db.Column(db.DateTime)
-    status = db.Column(db.Enum(ExperimentStatus), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
-
-    variants = db.relationship("Variant", backref="experiment", cascade="all, delete-orphan")
-
-
-class Variant(db.Model):
-    __tablename__ = 'variant'
-
-    variant_id = db.Column(db.Integer, primary_key=True)
-    experiment_id = db.Column(db.Integer, db.ForeignKey('experiment.experiment_id'), nullable=False, index=True)
-    name = db.Column(db.String, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
-
-    assignments = db.relationship("Assignment", backref="variant", cascade="all, delete-orphan")
-
-
-class Assignment(db.Model):
-    __tablename__ = 'assignment'
-
-    assignment_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.user_id'), nullable=False, index=True)
-    variant_id = db.Column(db.Integer, db.ForeignKey('variant.variant_id'), nullable=False, index=True)
-    assigned_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-
-    metric_results = db.relationship("MetricResult", backref="assignment", cascade="all, delete-orphan")
-
-    __table_args__ = (
-        db.UniqueConstraint('user_id', 'variant_id', name='unique_user_variant'),
-    )
-
-
-class Metric(db.Model):
-    __tablename__ = 'metric'
-
-    metric_id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String, nullable=False, unique=True)
-    description = db.Column(db.String)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
-
-    metric_results = db.relationship("MetricResult", backref="metric", cascade="all, delete-orphan")
-
-
-class MetricResult(db.Model):
-    __tablename__ = 'metric_result'
-
-    result_id = db.Column(db.Integer, primary_key=True)
-    assignment_id = db.Column(db.Integer, db.ForeignKey('assignment.assignment_id'), nullable=False, index=True)
-    metric_id = db.Column(db.Integer, db.ForeignKey('metric.metric_id'), nullable=False, index=True)
-    value = db.Column(db.Float, nullable=False)
-    recorded_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-
-    __table_args__ = (
-        db.UniqueConstraint('assignment_id', 'metric_id', name='unique_assignment_metric'),
-    )
-
-
-
-# Routes
-
-@app.route('/create_experiment', methods=['POST'])
-def create_experiment():
-    data = request.json
-    # exp = Experiment(
-    #     name=data['name'],
-    #     start_date=datetime.strptime(data['start_date'], "%Y-%m-%d"),
-    #     end_date=datetime.strptime(data['end_date'], "%Y-%m-%d"),
-    #     status='running'
-    # )
-    exp = Experiment(
-    name=data['name'],
-    start_date=datetime.strptime(data['start_date'], "%Y-%m-%d"),
-    end_date=datetime.strptime(data['end_date'], "%Y-%m-%d"),
-    status=ExperimentStatus.ACTIVE
-)
-
-    db.session.add(exp)
-    db.session.commit()
-
-    for variant_name in data['variants']:
-        db.session.add(Variant(name=variant_name, experiment_id=exp.experiment_id))
-    db.session.commit()
-    return jsonify({"message": "Experiment created", "experiment_id": exp.experiment_id})
-
-
-# @app.route('/assign_user', methods=['POST'])
-# def assign_user():
-#     data = request.json
-#     email = data['email']
-#     experiment_id = data['experiment_id']
-
-#     user = User.query.filter_by(email=email).first()
-#     if not user:
-#         user = User(email=email)
-#         db.session.add(user)
-#         db.session.commit()
-
-#     # Get experiment's variants
-#     variants = Variant.query.filter_by(experiment_id=experiment_id).all()
-#     chosen_variant = random.choice(variants)
-
-#     # Assign user to variant
-#     assignment = Assignment(user_id=user.user_id, variant_id=chosen_variant.variant_id)
-#     db.session.add(assignment)
-#     db.session.commit()
-
-#     return jsonify({
-#         "message": "User assigned",
-#         "variant": chosen_variant.name,
-#         "assignment_id": assignment.assignment_id
+# # Step 1: Generate and assign users
+# for _ in range(500):
+#     email = fake.email()
+#     response = requests.post(f"{BASE_URL}/assign_user", json={
+#         "email": email,
+#         "experiment_id": EXPERIMENT_ID
 #     })
+    
+#     if response.ok:
+#         result = response.json()
+#         assignment_id = result["assignment_id"]
+#         variant = result["variant"]
+#         assignment_map[email] = (assignment_id, variant)
+#         print(f"{email} → {variant} (assignment_id={assignment_id})")
+#     else:
+#         print(f"Error assigning {email}")
 
-@app.route('/assign_user', methods=['POST'])
-def assign_user():
-    data = request.json
-    email = data['email']
-    experiment_id = data['experiment_id']
+# # Step 2: Simulate metric recording 
+# record_metric = True
+# if record_metric:
+#     for email, (assignment_id, variant) in assignment_map.items():
+#         converted = random.random() < CONVERSION_RATES[variant]
+#         value = 1 if converted else 0
 
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        user = User(email=email)
-        db.session.add(user)
-        db.session.commit()
+#         res = requests.post(f"{BASE_URL}/record_metric", json={
+#             "assignment_id": assignment_id,
+#             "metric": "conversion",
+#             "value": value
+#         })
 
-    variants = Variant.query.filter_by(experiment_id=experiment_id).all()
-    if not variants:
-        return jsonify({"error": "No variants found for this experiment"}), 404
+#         print(f"Recorded conversion={value} for {email} ({variant})")
 
-    chosen_variant = random.choice(variants)
+# import requests
+# import random
+# from faker import Faker
 
-    # Check if user already assigned to this experiment to avoid duplicate assignments
-    existing_assignment = Assignment.query.join(Variant).filter(
-        Assignment.user_id == user.user_id,
-        Variant.experiment_id == experiment_id
-    ).first()
-    if existing_assignment:
-        return jsonify({
-            "message": "User already assigned",
-            "variant": existing_assignment.variant.name,
-            "assignment_id": existing_assignment.assignment_id
-        })
+# fake = Faker()
+# BASE_URL = "http://127.0.0.1:5001"
 
-    assignment = Assignment(user_id=user.user_id, variant_id=chosen_variant.variant_id)
-    db.session.add(assignment)
-    db.session.commit()
+# # Variant-specific conversion rates per experiment
+# EXPERIMENT_CONVERSION_RATES = {
 
-    return jsonify({
-        "message": "User assigned",
-        "variant": chosen_variant.name,
-        "assignment_id": assignment.assignment_id
-    })
+#     1: {"Red Button": 0.3, "Blue Button": 0.5},
+#     2: {"Standardization": 0.4, "Normalization": 0.6},
+#     3: {"Logistic Regression": 0.5, "Decision Tree": 0.45},
+#     4: {"Image Rotation": 0.55, "Image Flipping": 0.5},
+#     5: {"Batch Inference": 0.35, "Real-time Inference": 0.65},
+#     6: {"Pandas Pipeline": 0.4, "Dask Pipeline": 0.6}
+# }
 
+# NUM_USERS = 300
+# record_metric = True
 
-@app.route('/record_metric', methods=['POST'])
-def record_metric():
-    data = request.json
-    metric = Metric.query.filter_by(name=data['metric']).first()
-    if not metric:
-        metric = Metric(name=data['metric'], description="Auto-created")
-        db.session.add(metric)
-        db.session.commit()
+# for experiment_id, conversion_map in EXPERIMENT_CONVERSION_RATES.items():
+#     print(f"\nSimulating experiment {experiment_id}...")
+#     assignment_map = {}
 
-    result = MetricResult(
-        assignment_id=data['assignment_id'],
-        metric_id=metric.metric_id,
-        value=data['value']
-    )
-    db.session.add(result)
-    db.session.commit()
-    return jsonify({"message": "Metric recorded"})
+#     for _ in range(NUM_USERS):
+#         email = fake.email()
+#         response = requests.post(f"{BASE_URL}/assign_user", json={
+#             "email": email,
+#             "experiment_id": experiment_id
+#         })
 
+#         if response.ok:
+#             result = response.json()
+#             assignment_id = result["assignment_id"]
+#             variant = result["variant"]
+#             assignment_map[email] = (assignment_id, variant)
+#             print(f"{email} → {variant} (assignment_id={assignment_id})")
+#         else:
+#             print(f"Error assigning {email}: {response.text}")
 
-@app.route('/results/<int:experiment_id>', methods=['GET'])
-def results(experiment_id):
-    variants = Variant.query.filter_by(experiment_id=experiment_id).all()
-    response = {}
+#     if record_metric:
+#         for email, (assignment_id, variant) in assignment_map.items():
+#             conversion_rate = conversion_map.get(variant, 0.5)
+#             converted = random.random() < conversion_rate
+#             value = 1 if converted else 0
 
-    for variant in variants:
-        assignments = Assignment.query.filter_by(variant_id=variant.variant_id).all()
-        assignment_ids = [a.assignment_id for a in assignments]
+#             res = requests.post(f"{BASE_URL}/record_metric", json={
+#                 "assignment_id": assignment_id,
+#                 "metric": "conversion",
+#                 "value": value
+#             })
 
-        results = MetricResult.query.filter(MetricResult.assignment_id.in_(assignment_ids)).all()
-        if not results:
-            avg_value = 0
-        else:
-            avg_value = sum(r.value for r in results) / len(results)
-
-        response[variant.name] = {
-            "assignments": len(assignments),
-            "average_metric_value": avg_value
-        }
-
-    return jsonify(response)
+#             if res.ok:
+#                 print(f"Recorded conversion={value} for {email} ({variant})")
+#             else:
+#                 print(f"Failed to record metric for {email}")
 
 
-@app.route('/analyze/<int:experiment_id>')
-def analyze_experiment(experiment_id):
-    experiment = Experiment.query.get(experiment_id)
+# import requests
+# import random
+# from faker import Faker
+
+# fake = Faker()
+# BASE_URL = "http://127.0.0.1:5001"
+
+# # Conversion rates for each experiment variant
+# EXPERIMENT_CONVERSION_RATES = {
+#     1: {"Red Button": 0.3, "Blue Button": 0.5},
+#     2: {"Standardization": 0.4, "Normalization": 0.6},
+#     3: {"Logistic Regression": 0.5, "Decision Tree": 0.45},
+#     4: {"Image Rotation": 0.55, "Image Flipping": 0.5},
+#     5: {"Batch Inference": 0.35, "Real-time Inference": 0.65},
+#     6: {"Pandas Pipeline": 0.4, "Dask Pipeline": 0.6}
+# }
+
+# # ------------------------------------------------------------------ #
+# # Helper functions
+# # ------------------------------------------------------------------ #
+
+# def get_available_experiments():
+#     try:
+#         r = requests.get(f"{BASE_URL}/experiments", timeout=8)
+#         return r.json() if r.ok else []
+#     except requests.RequestException as e:
+#         print("Connection error:", e)
+#         return []
+
+# def display_experiments(experiments):
+#     if not experiments:
+#         print("No experiments available."); return False
+#     print("\nAvailable Experiments\n" + "-" * 60)
+#     for i, exp in enumerate(experiments, 1):
+#         print(f"{i}. {exp['name']} (ID: {exp['id']})")
+#         print(f"   Start: {exp['start_date']} | End: {exp['end_date']}")
+#         print(f"   Variants: {', '.join(exp.get('variants', []))}\n")
+#     return True
+
+
+# def simulate_users_for_experiment(experiment_id: int, num_users: int):
+#     print(f"\nSimulating {num_users} users for experiment {experiment_id} …")
+#     print("-" * 50)
+
+#     assignment_map = {}
+#     conversion_rates = EXPERIMENT_CONVERSION_RATES.get(experiment_id, {})
+#     assigned = 0
+
+#     # 1) Assign every generated user
+#     for i in range(1, num_users + 1):
+#         email = fake.email()
+#         try:
+#             res = requests.post(
+#                 f"{BASE_URL}/assign_user",
+#                 json={"email": email, "experiment_id": experiment_id},
+#                 timeout=8
+#             )
+#             if res.ok:
+#                 data = res.json()
+#                 assignment_map[email] = (data["assignment_id"], data["variant"])
+#                 assigned += 1
+#                 print(f"User {i:3d}: {email} → {data['variant']} (ID: {data['assignment_id']})")
+#             else:
+#                 print(f"User {i:3d}: ✖ Assign failed – {res.text}")
+#         except requests.RequestException as e:
+#             print(f"User {i:3d}: ✖ Connection error – {e}")
+
+#     print(f"\n✅ Users assigned: {assigned}/{num_users}")
+
+#     # 2) Simulate and record conversions
+#     if not assignment_map:
+#         print("No users assigned, stopping."); return
+
+#     print("\nSimulating conversions …\n" + "-" * 30)
+#     conversions_recorded = total_conversions = 0
+
+#     for email, (aid, variant) in assignment_map.items():
+#         converted = random.random() < conversion_rates.get(variant, 0.5)
+#         value = int(converted)
+
+#         try:
+#             r = requests.post(
+#                 f"{BASE_URL}/record_metric",
+#                 json={"assignment_id": aid, "metric": "conversion", "value": value},
+#                 timeout=8
+#             )
+#             if r.ok:
+#                 conversions_recorded += 1
+#                 total_conversions += value
+#                 print(f"{email} ({variant}): {'✓ Converted' if converted else '○ No conversion'}")
+#             else:
+#                 print(f"✖ Metric record failed for {email}")
+#         except requests.RequestException as e:
+#             print(f"✖ Metric connection error for {email}: {e}")
+
+#     cr = (total_conversions / conversions_recorded * 100) if conversions_recorded else 0
+#     print("\n📊 Summary")
+#     print(f"- Metrics recorded: {conversions_recorded}")
+#     print(f"- Total conversions: {total_conversions}")
+#     print(f"- Observed conversion rate: {cr:.2f}%")
+
+
+
+# def main():
+#     print("🧪 Interactive Experiment Simulator\n" + "=" * 50)
+#     experiments = get_available_experiments()
+#     if not display_experiments(experiments):
+#         return
+
+#     try:
+#         idx = int(input("Select an experiment (number): ").strip())
+#         if not 1 <= idx <= len(experiments):
+#             print("Invalid selection."); return
+#         exp = experiments[idx - 1]
+#         n = input("How many users to simulate? (default 50): ").strip()
+#         num_users = int(n) if n else 50
+#         if num_users <= 0:
+#             print("User count must be positive."); return
+#         simulate_users_for_experiment(exp["id"], num_users)
+#     except (ValueError, KeyboardInterrupt):
+#         print("\nCancelled.")
+#     except Exception as e:
+#         print("Unexpected error:", e)
+
+# if __name__ == "__main__":
+#     main()
+
+
+# import requests
+# import random
+# from faker import Faker
+
+# fake = Faker()
+
+# EXPERIMENT_ID = 1  
+# BASE_URL = "http://127.0.0.1:5001"
+
+
+# CONVERSION_RATES = {
+#     "Red Button": 0.3,
+#     "Blue Button": 0.5
+# }
+
+# assignment_map = {}  
+
+# # Step 1: Generate and assign users
+# for _ in range(500):
+#     email = fake.email()
+#     response = requests.post(f"{BASE_URL}/assign_user", json={
+#         "email": email,
+#         "experiment_id": EXPERIMENT_ID
+#     })
+    
+#     if response.ok:
+#         result = response.json()
+#         assignment_id = result["assignment_id"]
+#         variant = result["variant"]
+#         assignment_map[email] = (assignment_id, variant)
+#         print(f"{email} → {variant} (assignment_id={assignment_id})")
+#     else:
+#         print(f"Error assigning {email}")
+
+# # Step 2: Simulate metric recording 
+# record_metric = True
+# if record_metric:
+#     for email, (assignment_id, variant) in assignment_map.items():
+#         converted = random.random() < CONVERSION_RATES[variant]
+#         value = 1 if converted else 0
+
+#         res = requests.post(f"{BASE_URL}/record_metric", json={
+#             "assignment_id": assignment_id,
+#             "metric": "conversion",
+#             "value": value
+#         })
+
+#         print(f"Recorded conversion={value} for {email} ({variant})")
+
+
+#original code
+# import requests
+# import random
+# from faker import Faker
+# from collections import defaultdict
+
+# fake = Faker()
+# BASE_URL = "http://127.0.0.1:5001"
+
+# # Conversion rates per experiment (for simulation)
+# CONVERSION_RATES = {
+#     "Button Color Test": {"Red Button": 0.3, "Blue Button": 0.5},
+#     "Checkout Flow Test": {"Single Page Checkout": 0.4, "Multi Page Checkout": 0.35},
+#     "Banner Ad Test": {"Static Banner": 0.2, "Animated Banner": 0.25}
+# }
+
+# def get_active_experiments():
+#     """Fetch active experiments from the API."""
+#     try:
+#         response = requests.get(f"{BASE_URL}/experiments")
+#         if response.ok:
+#             return response.json()
+#         else:
+#             print(f"Error fetching experiments: {response.text}")
+#             return []
+#     except requests.RequestException as e:
+#         print(f"Failed to connect to API: {e}")
+#         return []
+
+# def prompt_user_for_experiments(experiments):
+#     """Prompt user to select experiments by ID."""
+#     if not experiments:
+#         print("No active experiments available.")
+#         return []
+
+#     print("\nAvailable Experiments:")
+#     for exp in experiments:
+#         print(f"ID: {exp['experiment_id']}, Name: {exp['name']}, Variants: {exp['variants']}")
+
+#     selected_ids = []
+#     while not selected_ids:
+#         try:
+#             user_input = input("\nEnter experiment IDs to simulate (comma-separated, e.g., 1,2,3) or 'all' for all: ").strip()
+#             if user_input.lower() == 'all':
+#                 selected_ids = [exp['experiment_id'] for exp in experiments]
+#             else:
+#                 selected_ids = [int(id.strip()) for id in user_input.split(',')]
+#                 # Validate IDs
+#                 valid_ids = {exp['experiment_id'] for exp in experiments}
+#                 if not all(id in valid_ids for id in selected_ids):
+#                     print("Invalid experiment ID(s). Please try again.")
+#                     selected_ids = []
+#         except ValueError:
+#             print("Invalid input. Please enter numbers separated by commas or 'all'.")
+    
+#     return selected_ids
+
+# # Fetch and prompt for experiments
+# experiments = get_active_experiments()
+# EXPERIMENT_IDS = prompt_user_for_experiments(experiments)
+# if not EXPERIMENT_IDS:
+#     print("No experiments selected. Exiting.")
+#     exit()
+
+# # Store assignments: {email: {experiment_id: (assignment_id, variant)}}
+# assignment_map = defaultdict(dict)
+
+# # Step 1: Assign users to selected experiments
+# NUM_USERS = 500
+# for _ in range(NUM_USERS):
+#     email = fake.email()
+#     for experiment_id in EXPERIMENT_IDS:
+#         response = requests.post(f"{BASE_URL}/assign_user", json={
+#             "email": email,
+#             "experiment_id": experiment_id
+#         })
+#         if response.ok:
+#             result = response.json()
+#             assignment_id = result["assignment_id"]
+#             variant = result["variant"]
+#             assignment_map[email][experiment_id] = (assignment_id, variant)
+#             print(f"{email} → Exp {experiment_id}: {variant} (ID={assignment_id})")
+#         else:
+#             print(f"Error assigning {email} to Exp {experiment_id}: {response.text}")
+
+# # Step 2: Record metrics
+# for email, experiments in assignment_map.items():
+#     for experiment_id, (assignment_id, variant) in experiments.items():
+#         # Lookup experiment name
+#         experiment = next((e for e in get_active_experiments() if e['experiment_id'] == experiment_id), None)
+#         if not experiment:
+#             print(f"Experiment {experiment_id} not found.")
+#             continue
+#         experiment_name = experiment['name']
+
+#         # Simulate conversion
+#         conversion_rate = CONVERSION_RATES.get(experiment_name, {}).get(variant, 0.1)
+#         value = 1 if random.random() < conversion_rate else 0
+#         response = requests.post(f"{BASE_URL}/record_metric", json={
+#             "assignment_id": assignment_id,
+#             "metric": "conversion",
+#             "value": value
+#         })
+#         if response.ok:
+#             print(f"Recorded conversion={value} for {email} (Exp {experiment_id}: {variant})")
+#         else:
+#             print(f"Error recording for {email} (Exp {experiment_id}): {response.text}")
+
+# # Step 3: Analyze experiments
+# for experiment_id in EXPERIMENT_IDS:
+#     response = requests.get(f"{BASE_URL}/analyze/{experiment_id}")
+#     if response.ok:
+#         print(f"\nAnalysis for Experiment {experiment_id}:")
+#         print(response.json())
+#     else:
+#         print(f"Failed to analyze Exp {experiment_id}: {response.text}")
+
+import requests
+import random
+from faker import Faker
+from collections import defaultdict
+from scipy.stats import norm
+import math
+
+fake = Faker()
+BASE_URL = "http://127.0.0.1:5001"
+
+# Conversion rates per experiment
+CONVERSION_RATES = {
+    "Button Color Test": {"Red Button": 0.3, "Blue Button": 0.5},
+    "Checkout Flow Test": {"Single Page Checkout": 0.4, "Multi Page Checkout": 0.35},
+    "Banner Ad Test": {"Static Banner": 0.2, "Animated Banner": 0.25}
+}
+
+# Statistical parameters
+ALPHA = 0.05
+POWER = 0.80
+MDE = 0.1
+
+def calculate_sample_size(baseline_rate, mde=0.1, alpha=0.05, power=0.80):
+    z_alpha = norm.ppf(1 - alpha / 2)
+    z_beta = norm.ppf(power)
+    p1 = baseline_rate
+    p2 = p1 + mde
+    pooled_var = p1 * (1 - p1) + p2 * (1 - p2)
+    n = (z_alpha + z_beta) ** 2 * pooled_var / (mde ** 2)
+    return math.ceil(n)
+
+def get_active_experiments():
+    try:
+        response = requests.get(f"{BASE_URL}/experiments")
+        if response.ok:
+            return response.json()
+        print(f"Error fetching experiments: {response.text}")
+        return []
+    except requests.RequestException as e:
+        print(f"Failed to connect to API: {e}")
+        return []
+
+def prompt_user_for_experiments(experiments):
+    if not experiments:
+        print("No active experiments available.")
+        return []
+    print("\nAvailable Experiments:")
+    for exp in experiments:
+        print(f"ID: {exp['experiment_id']}, Name: {exp['name']}, Variants: {exp['variants']}")
+    selected_ids = []
+    while not selected_ids:
+        try:
+            user_input = input("\nEnter experiment IDs (comma-separated, e.g., 1,2,3) or 'all': ").strip()
+            if user_input.lower() == 'all':
+                selected_ids = [exp['experiment_id'] for exp in experiments]
+            else:
+                selected_ids = [int(id.strip()) for id in user_input.split(',')]
+                valid_ids = {exp['experiment_id'] for exp in experiments}
+                if not all(id in valid_ids for id in selected_ids):
+                    print("Invalid experiment ID(s).")
+                    selected_ids = []
+        except ValueError:
+            print("Invalid input. Enter numbers separated by commas or 'all'.")
+    return selected_ids
+
+# Fetch and prompt
+experiments = get_active_experiments()
+EXPERIMENT_IDS = prompt_user_for_experiments(experiments)
+if not EXPERIMENT_IDS:
+    print("No experiments selected. Exiting.")
+    exit()
+
+# Calculate sample sizes
+sample_sizes = {}
+for experiment_id in EXPERIMENT_IDS:
+    experiment = next((e for e in experiments if e['experiment_id'] == experiment_id), None)
     if not experiment:
-        return jsonify({"error": "Experiment not found"}), 404
+        print(f"Experiment {experiment_id} not found.")
+        continue
+    experiment_name = experiment['name']
+    baseline_rate = list(CONVERSION_RATES.get(experiment_name, {}).values())[0] if CONVERSION_RATES.get(experiment_name) else 0.1
+    sample_size = calculate_sample_size(baseline_rate, MDE, ALPHA, POWER)
+    sample_sizes[experiment_id] = sample_size
+    print(f"Experiment {experiment_id} ({experiment_name}): {sample_size} users per variant")
 
-    variants = Variant.query.filter_by(experiment_id=experiment_id).all()
-    if len(variants) < 2:
-        return jsonify({"error": "At least two variants are required for analysis"}), 400
+# Store assignments
+all_assignments = defaultdict(dict)
+sample_assignments = defaultdict(list)
 
-    # Collect data for each variant
-    data = {}
-    for variant in variants:
-        assignments = Assignment.query.filter_by(variant_id=variant.variant_id).all()
-        assignment_ids = [a.assignment_id for a in assignments]
-        results_query = MetricResult.query.filter(
-            MetricResult.assignment_id.in_(assignment_ids),
-            MetricResult.metric.has(name='conversion')
-        )
-        results = results_query.all()
+# Step 1: Assign all users
+for experiment_id in EXPERIMENT_IDS:
+    sample_size = sample_sizes[experiment_id]
+    experiment = next((e for e in experiments if e['experiment_id'] == experiment_id), None)
+    if not experiment:
+        continue
+    num_variants = len(experiment['variants'])
+    total_users = sample_size * num_variants * 2
+    for _ in range(total_users):
+        email = fake.email()
+        response = requests.post(f"{BASE_URL}/assign_user", json={
+            "email": email,
+            "experiment_id": experiment_id
+        })
+        if response.ok:
+            result = response.json()
+            assignment_id = result["assignment_id"]
+            user_id = result["user_id"]
+            variant = result["variant"]
+            all_assignments[email][experiment_id] = (user_id, assignment_id, variant)
+            print(f"{email} → Exp {experiment_id}: {variant} (ID={assignment_id})")
+        else:
+            print(f"Error assigning {email} to Exp {experiment_id}: {response.text}")
 
-        conversions = sum(r.value for r in results)
-        total = len(results)
-
-        if total == 0:
-            continue
-
-        data[variant.name] = {
-            "conversions": conversions,
-            "total": total,
-            "conversion_rate": conversions / total
-        }
-
-    if len(data) < 2:
-        return jsonify({"error": "Not enough data for analysis"}), 400
-
-    # Run Z-test for proportions between each pair of variants
-    analysis_results = []
-    variant_names = list(data.keys())
-    for i in range(len(variant_names)):
-        for j in range(i + 1, len(variant_names)):
-            v1, v2 = variant_names[i], variant_names[j]
-            x1, n1 = data[v1]['conversions'], data[v1]['total']
-            x2, n2 = data[v2]['conversions'], data[v2]['total']
-
-            # Pooled Proportion
-            p_pool = (x1 + x2) / (n1 + n2)
-            se = (p_pool * (1 - p_pool) * (1/n1 + 1/n2)) ** 0.5
-            z = (x1/n1 - x2/n2) / se
-            p_value = 2 * (1 - norm.cdf(abs(z)))  # Two-tailed test
-
-            analysis_results.append({
-                "variant_1": v1,
-                "variant_2": v2,
-                "conversion_rate_1": round(x1/n1, 4),
-                "conversion_rate_2": round(x2/n2, 4),
-                "z_statistic": round(z, 4),
-                "p_value": round(p_value, 4),
-                "significant": "Yes" if p_value < 0.05 else "No"  # Convert boolean to string
+# Step 2: Select sample size users
+for experiment_id in EXPERIMENT_IDS:
+    sample_size = sample_sizes[experiment_id]
+    experiment = next((e for e in experiments if e['experiment_id'] == experiment_id), None)
+    if not experiment:
+        continue
+    num_variants = len(experiment['variants'])
+    variant_assignments = defaultdict(list)
+    for email, exps in all_assignments.items():
+        if experiment_id in exps:
+            user_id, assignment_id, variant = exps[experiment_id]
+            variant_assignments[variant].append((user_id, assignment_id))
+    for variant, assignments in variant_assignments.items():
+        selected = random.sample(assignments, min(sample_size, len(assignments)))
+        for user_id, assignment_id in selected:
+            sample_assignments[experiment_id].append((user_id, assignment_id, variant))
+            response = requests.post(f"{BASE_URL}/add_sample_size_user", json={
+                "user_id": user_id,
+                "experiment_id": experiment_id,
+                "assignment_id": assignment_id
             })
+            if response.ok:
+                print(f"Added sample user {user_id} to Exp {experiment_id} ({variant})")
+            else:
+                print(f"Error adding sample user {user_id} to Exp {experiment_id}: {response.text}")
 
-    return jsonify({
-        "experiment": {
-            "experiment_id": experiment.experiment_id,
-            "name": experiment.name,
-            "status": experiment.status.value  # Get the string value of the enum
-        },
-        "analysis": analysis_results
-    })
+# Step 3: Record metrics
+for experiment_id, assignments in sample_assignments.items():
+    experiment = next((e for e in get_active_experiments() if e['experiment_id'] == experiment_id), None)
+    if not experiment:
+        print(f"Experiment {experiment_id} not found.")
+        continue
+    experiment_name = experiment['name']
+    for user_id, assignment_id, variant in assignments:
+        conversion_rate = CONVERSION_RATES.get(experiment_name, {}).get(variant, 0.1)
+        value = 1 if random.random() < conversion_rate else 0
+        response = requests.post(f"{BASE_URL}/record_metric", json={
+            "assignment_id": assignment_id,
+            "metric": "conversion",
+            "value": value
+        })
+        if response.ok:
+            print(f"Recorded conversion={value} for user {user_id} (Exp {experiment_id}: {variant})")
+        else:
+            print(f"Error recording for user {user_id} (Exp {experiment_id}): {response.text}")
 
-if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-    app.run(debug=True,port=5001)
+# Step 4: Analyze
+for experiment_id in EXPERIMENT_IDS:
+    response = requests.get(f"{BASE_URL}/analyze/{experiment_id}")
+    if response.ok:
+        print(f"\nAnalysis for Experiment {experiment_id} (Sample Size: {sample_sizes[experiment_id]} per variant):")
+        print(response.json())
+    else:
+        print(f"Failed to analyze Exp {experiment_id}: {response.text}")
