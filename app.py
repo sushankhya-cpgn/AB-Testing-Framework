@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import Index
 from scipy.stats import norm, ttest_ind, chi2_contingency
+from numpy import format_float_scientific
 from collections import defaultdict
 import random
 import enum
@@ -103,6 +104,7 @@ class SampleSizeUser(db.Model):
         Index('idx_sample_user_experiment', 'user_id', 'experiment_id'),
     )
 
+
 @app.route('/create_experiment', methods=['POST'])
 def create_experiment():
     data = request.json
@@ -194,6 +196,7 @@ def record_metric():
         db.session.rollback()
         return jsonify({"error": str(e)}), 400
 
+   
 @app.route('/add_sample_size_user', methods=['POST'])
 def add_sample_size_user():
     data = request.json
@@ -276,24 +279,24 @@ def analyze_experiment(experiment_id):
             # Z-test for binary metrics
             variant_names = list(data.keys())
             num_comparisons = len(variant_names) * (len(variant_names) - 1) // 2
-            alpha_corrected = 0.05 / num_comparisons  # Bonferroni correction
-            for i in range(len(variant_names)):
-                for j in range(i + 1, len(variant_names)):
-                    v1, v2 = variant_names[i], variant_names[j]
+         
+            if len(variant_names) == 2:
+                    v1, v2 = variant_names[0], variant_names[1]
                     x1, n1 = sum(data[v1]), len(data[v1])
                     x2, n2 = sum(data[v2]), len(data[v2])
                     p_pool = (x1 + x2) / (n1 + n2)
                     se = (p_pool * (1 - p_pool) * (1/n1 + 1/n2)) ** 0.5
                     z = (x1/n1 - x2/n2) / se
                     p_value = 2 * (1 - norm.cdf(abs(z)))
+                    alpha = 0.05
                     analysis_results.append({
                         "variant_1": v1,
                         "variant_2": v2,
                         "conversion_rate_1": round(x1/n1, 4),
                         "conversion_rate_2": round(x2/n2, 4),
                         "z_statistic": round(z, 4),
-                        "p_value": float(f"{p_value:.12f}"),
-                        "significant": "Yes" if p_value < alpha_corrected else "No"
+                        "p_value": format_float_scientific(p_value, precision=2),
+                        "significant": "Yes" if p_value < alpha else "No"
                     })
 
         elif metric_type == MetricType.CONTINUOUS:
@@ -312,7 +315,7 @@ def analyze_experiment(experiment_id):
                         "mean_1": round(sum(values1)/len(values1), 4),
                         "mean_2": round(sum(values2)/len(values2), 4),
                         "t_statistic": round(t_stat, 4),
-                        "p_value": float(f"{p_value:.12f}"),
+                        "p_value": float(f"{p_value:.2e}"),
                         "significant": "Yes" if p_value < alpha_corrected else "No"
                     })
 
@@ -325,7 +328,7 @@ def analyze_experiment(experiment_id):
             analysis_results.append({
                 "variants": variant_names,
                 "chi2_statistic": round(chi2_stat, 4),
-                "p_value": float(f"{p_value:.12f}"),
+                "p_value": float(f"{p_value:.2e}"),
                 "significant": "Yes" if p_value < 0.05 else "No"
             })
 
@@ -342,7 +345,10 @@ def analyze_experiment(experiment_id):
         logger.error(f"Error analyzing experiment: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     app.run(debug=True, port=5001)
+
